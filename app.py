@@ -64,4 +64,4 @@ def proxy(path):
 if __name__ == '__main__':
     # Render সাধারণত gunicorn ব্যবহার করে, তাই এই অংশটি লোকাল টেস্টিংয়ের জন্য
     # Render-এ সরাসরি এটি রান হবে না, নিচের Dockerfile CMD রান হবে
-    app.run(host='0.0.0.0', port=port, debug=False) # debug=True প্রোডাকশনে ব্যবহার করবেন না
+    app.run(host='0.0.0.0', port=8080, debug=False) # debug=True প্রোডাকশনে ব্যবহার করবেন না
