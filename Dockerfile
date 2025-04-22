@@ -19,4 +19,4 @@ COPY app.py /app/
 # Gunicorn ব্যবহার করে অ্যাপ রান করার কমান্ড
 # Render স্বয়ংক্রিয়ভাবে PORT এনভায়রনমেন্ট ভেরিয়েবল সেট করবে।
 # Gunicorn এটিকে বাইন্ড করার জন্য ব্যবহার করবে।
-CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
