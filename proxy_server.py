@@ -1,108 +1,67 @@
-import socket
-import threading
-import sys
+import os
+import requests
+from flask import Flask, request, Response
 
-# কনফিগারেশন
-LISTENING_HOST = '0.0.0.0'  # সব ইন্টারফেসে শুনবে
-LISTENING_PORT = 8888      # এই পোর্টে প্রক্সি চলবে
-MAX_CONNECTIONS = 5        # একবারে কতজন কানেক্ট করতে পারবে
-BUFFER_SIZE = 4096         # ডেটা ট্রান্সফারের জন্য বাফার সাইজ
+app = Flask(__name__)
 
-def handle_client(client_socket):
-    """ক্লায়েন্টের অনুরোধ হ্যান্ডেল করে এবং ডেস্টিনেশন সার্ভারে পাঠায়"""
+# Render সাধারণত 'PORT' এনভায়রনমেন্ট ভেরিয়েবলে পোর্ট সেট করে
+# লোকাল টেস্টিং বা ডিফল্ট হিসেবে 8080 ব্যবহার করা যেতে পারে
+port = int(os.environ.get("PORT", 8080))
+
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
+def proxy(path):
+    """
+    ইনকামিং অনুরোধ গ্রহণ করে, ডেস্টিনেশন সার্ভারে পাঠায় এবং রেসপন্স ফেরত দেয়।
+    """
+    # গন্তব্য ইউআরএল তৈরি (শুধুমাত্র HTTP)
+    # request.url রুট থেকে পুরো পাথসহ URL দেয় (e.g., http://your-render-app.com/http://example.com/page)
+    # আমাদের প্রক্সি ব্যবহারের নিয়ম অনুযায়ী URL অনুরোধের পাথ হিসেবে আসবে
+    # যেমন: GET http://example.com/ HTTP/1.1 এর পরিবর্তে GET / HTTP/1.1 Host: example.com
+    # অথবা ক্লায়েন্টকে পুরো URL পাথ হিসেবে পাঠাতে হবে: GET /http://example.com/page HTTP/1.1
+
+    # একটি সরল পদ্ধতি হলো Host হেডার ব্যবহার করা
+    host = request.headers.get('Host')
+    if not host:
+        return "Host header is missing", 400
+
+    # স্কিম নির্ধারণ (সরল প্রক্সির জন্য সবসময় http)
+    scheme = 'http' # এই প্রক্সি শুধুমাত্র HTTP সমর্থন করে
+
+    # গন্তব্য URL তৈরি
+    # request.full_path পাথ এবং কোয়েরি স্ট্রিং দেয় (? সহ)
+    destination_url = f"{scheme}://{host}{request.full_path}"
+
+    print(f"[*] ফরওয়ার্ডিং অনুরোধ: {request.method} {destination_url}")
+
     try:
-        # ক্লায়েন্টের কাছ থেকে প্রাথমিক অনুরোধ গ্রহণ
-        request_data = client_socket.recv(BUFFER_SIZE)
-        if not request_data:
-            print("[-] ক্লায়েন্টের কাছ থেকে কোনো ডেটা আসেনি।")
-            return
+        # ডেস্টিনেশন সার্ভারে অনুরোধ পাঠানো
+        # requests লাইব্রেরি ব্যবহার করে এটি করা সহজ
+        resp = requests.request(
+            method=request.method,
+            url=destination_url,
+            headers={key: value for (key, value) in request.headers if key != 'Host'}, # মূল Host হেডার বাদ দিয়ে নতুন URL অনুযায়ী requests নিজেই Host সেট করবে
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False, # রিডাইরেক্ট প্রক্সির মাধ্যমে হ্যান্ডেল না করাই ভালো
+            stream=True # বড় রেসপন্সের জন্য স্ট্রিম করা ভালো
+        )
 
-        # অনুরোধ থেকে প্রথম লাইন (যেমন GET http://example.com/ HTTP/1.1) পার্স করা
-        first_line = request_data.split(b'\n')[0]
-        url = first_line.split(b' ')[1]
+        # মূল ক্লায়েন্টের কাছে রেসপন্স ফেরত পাঠানো
+        # হেডারগুলো কপি করা (কিছু হেডার বাদ দেওয়া যেতে পারে)
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(name, value) for (name, value) in resp.raw.headers.items()
+                   if name.lower() not in excluded_headers]
 
-        # হোস্ট এবং পোর্ট বের করা
-        http_pos = url.find(b'://')
-        if http_pos == -1:
-            temp = url
-        else:
-            temp = url[(http_pos + 3):]
+        # Flask রেসপন্স তৈরি
+        response = Response(resp.content, resp.status_code, headers)
+        return response
 
-        port_pos = temp.find(b':')
-        webserver_pos = temp.find(b'/')
-        if webserver_pos == -1:
-            webserver_pos = len(temp)
-
-        webserver = ""
-        port = -1
-        if port_pos == -1 or webserver_pos < port_pos:
-            port = 80  # ডিফল্ট HTTP পোর্ট
-            webserver = temp[:webserver_pos]
-        else:
-            port = int(temp[(port_pos + 1):][:webserver_pos - port_pos - 1])
-            webserver = temp[:port_pos]
-
-        print(f"[+] ডেস্টিনেশন সার্ভার: {webserver.decode()} পোর্ট: {port}")
-
-        # ডেস্টিনেশন সার্ভারের সাথে সংযোগ স্থাপন
-        proxy_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        proxy_server_socket.connect((webserver, port))
-
-        # ক্লায়েন্টের মূল অনুরোধটি ডেস্টিনেশন সার্ভারে পাঠানো
-        proxy_server_socket.sendall(request_data)
-
-        print(f"[+] ক্লায়েন্ট থেকে {webserver.decode()}:{port} এ ডেটা ফরওয়ার্ড করা হচ্ছে...")
-
-        # ডেটা আদান-প্রদান (রিলে)
-        while True:
-            # ডেস্টিনেশন সার্ভার থেকে ডেটা পড়া
-            reply = proxy_server_socket.recv(BUFFER_SIZE)
-            if len(reply) > 0:
-                # ক্লায়েন্টের কাছে ডেটা পাঠানো
-                client_socket.send(reply)
-                print(f"[<] {webserver.decode()}:{port} থেকে ক্লায়েন্টের কাছে ডেটা পাঠানো হচ্ছে ({len(reply)} বাইট)")
-            else:
-                # যদি কোনো ডেটা না আসে, ব্রেক
-                break
-
-        # সকেট বন্ধ করা
-        proxy_server_socket.close()
-        client_socket.close()
-        print(f"[*] {webserver.decode()}:{port} এর সাথে সংযোগ বন্ধ করা হয়েছে।")
-
-    except Exception as e:
-        print(f"[!] ক্লায়েন্ট হ্যান্ডেলিং এরর: {e}")
-        # কোনো সমস্যা হলে সকেট বন্ধ করে দেওয়া
-        if 'client_socket' in locals() and client_socket:
-             client_socket.close()
-        if 'proxy_server_socket' in locals() and proxy_server_socket:
-             proxy_server_socket.close()
-
-
-def start_proxy_server():
-    """প্রক্সি সার্ভার শুরু করে এবং ইনকামিং সংযোগের জন্য অপেক্ষা করে"""
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        server.bind((LISTENING_HOST, LISTENING_PORT))
-        server.listen(MAX_CONNECTIONS)
-        print(f"[*] প্রক্সি সার্ভার {LISTENING_HOST}:{LISTENING_PORT} এ চলছে...")
-    except Exception as e:
-        print(f"[!] সার্ভার চালু করা যায়নি: {e}")
-        sys.exit(1)
-
-    while True:
-        try:
-            client_socket, addr = server.accept()
-            print(f"\n[+] নতুন সংযোগ এসেছে: {addr[0]}:{addr[1]}")
-            # প্রতিটি ক্লায়েন্টের জন্য একটি নতুন থ্রেড তৈরি করা
-            client_handler = threading.Thread(target=handle_client, args=(client_socket,))
-            client_handler.start()
-        except KeyboardInterrupt:
-            print("\n[*] ব্যবহারকারী দ্বারা সার্ভার বন্ধ করা হচ্ছে...")
-            server.close()
-            sys.exit(0)
-        except Exception as e:
-            print(f"[!] সংযোগ গ্রহণ করার সময় ত্রুটি: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"[!] ডেস্টিনেশন সার্ভারে সংযোগ করতে সমস্যা: {e}")
+        return f"Proxy error: Could not connect to destination server. Reason: {e}", 502 # 502 Bad Gateway
 
 if __name__ == '__main__':
-    start_proxy_server()
+    # Render সাধারণত gunicorn ব্যবহার করে, তাই এই অংশটি লোকাল টেস্টিংয়ের জন্য
+    # Render-এ সরাসরি এটি রান হবে না, নিচের Dockerfile CMD রান হবে
+    app.run(host='0.0.0.0', port=port, debug=False) # debug=True প্রোডাকশনে ব্যবহার করবেন না
